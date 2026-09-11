@@ -21,6 +21,7 @@
 //! The origin URI carries what the header knew:
 //! `dns://peer/probe.xmip.example.?zone=xmip.example.&id=4660`.
 
+pub mod loopback;
 pub mod message;
 
 use std::io::{Read, Write};
@@ -28,6 +29,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
+pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
@@ -47,6 +49,21 @@ pub struct DnsTransport {
     carrier: Carrier,
     timeout: Option<Duration>,
     next_id: AtomicU16,
+}
+
+impl Clone for DnsTransport {
+    /// The same ends and the id count as it stands, so a copy's updates go
+    /// on from where this one's have got to.
+    fn clone(&self) -> Self {
+        Self {
+            bind: self.bind.clone(),
+            zone: self.zone.clone(),
+            name: self.name.clone(),
+            carrier: self.carrier,
+            timeout: self.timeout,
+            next_id: AtomicU16::new(self.next_id.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 impl DnsTransport {
