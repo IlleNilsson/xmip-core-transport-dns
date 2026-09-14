@@ -1,8 +1,10 @@
-//! RFC 1035 section 4: the header, names with compression, questions and
-//! resource records — and the RFC 2136 UPDATE that reuses the four sections
-//! as zone, prerequisite, update and additional.
+//! RFC 1035 section 4: the header, questions and resource records — and
+//! the RFC 2136 UPDATE that reuses the four sections as zone, prerequisite,
+//! update and additional. A name's label-and-pointer form is the
+//! capability's, shared with mdns (ADR-0044).
 
 use transport::error::{Result, protocol_error};
+use transport::label::{read_name, write_name};
 
 /// The largest message a UDP datagram carries without EDNS.
 pub const UDP_CLASSIC: usize = 512;
@@ -171,7 +173,7 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
         out.extend_from_slice(&count.to_be_bytes());
     }
     for question in &message.questions {
-        name(&mut out, &question.name)?;
+        write_name(&mut out, &question.name)?;
         out.extend_from_slice(&question.kind.to_be_bytes());
         out.extend_from_slice(&question.class.to_be_bytes());
     }
@@ -179,7 +181,7 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
         .into_iter()
         .flatten()
     {
-        name(&mut out, &record.name)?;
+        write_name(&mut out, &record.name)?;
         out.extend_from_slice(&record.kind.to_be_bytes());
         out.extend_from_slice(&record.class.to_be_bytes());
         out.extend_from_slice(&record.ttl.to_be_bytes());
@@ -192,24 +194,6 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
         return Err(protocol_error("a message over what DNS can frame"));
     }
     Ok(out)
-}
-
-fn name(out: &mut Vec<u8>, text: &str) -> Result<()> {
-    let mut total = 0;
-    for label in text.split('.').filter(|l| !l.is_empty()) {
-        let length = u8::try_from(label.len())
-            .ok()
-            .filter(|l| *l <= 63)
-            .ok_or_else(|| protocol_error(format!("{label:?} is longer than a label may be")))?;
-        total += usize::from(length) + 1;
-        out.push(length);
-        out.extend_from_slice(label.as_bytes());
-    }
-    if total > 254 {
-        return Err(protocol_error("a name over 255 bytes"));
-    }
-    out.push(0);
-    Ok(())
 }
 
 /// Decode one message.
@@ -279,46 +263,6 @@ fn short() -> transport::TransportError {
 fn field16(bytes: &[u8], at: usize) -> Result<u16> {
     let pair = bytes.get(at..at + 2).ok_or_else(short)?;
     Ok(u16::from_be_bytes([pair[0], pair[1]]))
-}
-
-/// A name at `at`, pointers followed; the name and where the next field
-/// starts.
-fn read_name(bytes: &[u8], at: usize) -> Result<(String, usize)> {
-    let mut labels = Vec::new();
-    let mut cursor = at;
-    let mut next = None;
-    let mut hops = 0;
-    loop {
-        let length = *bytes.get(cursor).ok_or_else(short)?;
-        if length & 0xc0 == 0xc0 {
-            let low = *bytes.get(cursor + 1).ok_or_else(short)?;
-            let pointer = usize::from(u16::from_be_bytes([length & 0x3f, low]));
-            if pointer >= cursor || hops > 32 {
-                return Err(protocol_error("a compression pointer that loops"));
-            }
-            next.get_or_insert(cursor + 2);
-            cursor = pointer;
-            hops += 1;
-            continue;
-        }
-        if length > 63 {
-            return Err(protocol_error("a label over 63 bytes"));
-        }
-        cursor += 1;
-        if length == 0 {
-            break;
-        }
-        let label = bytes
-            .get(cursor..cursor + usize::from(length))
-            .ok_or_else(short)?;
-        labels.push(String::from_utf8_lossy(label).into_owned());
-        cursor += usize::from(length);
-    }
-    let mut text = labels.join(".");
-    if !text.is_empty() {
-        text.push('.');
-    }
-    Ok((text, next.unwrap_or(cursor)))
 }
 
 #[cfg(test)]

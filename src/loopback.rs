@@ -167,24 +167,7 @@ impl Loopback for DnsTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn edges() -> Vec<(&'static str, Vec<u8>)> {
-        vec![
-            ("empty", Vec::new()),
-            ("one byte", vec![0x2a]),
-            ("every byte", (0..=255).collect()),
-            ("nul run", vec![0; 512]),
-            ("high bytes", vec![0xff; 512]),
-            ("crlf storm", b"\r\n".repeat(400)),
-        ]
-    }
-
-    /// `len` bytes that a truncation, a reorder or a duplicate would change.
-    fn patterned(len: usize) -> Vec<u8> {
-        (0..len)
-            .map(|at| u8::try_from((at * 31 + at / 251) % 256).unwrap_or(0))
-            .collect()
-    }
+    use transport::payload::{edge_payloads, patterned};
 
     #[test]
     fn the_loopback_sends_one_update_and_takes_its_payload() {
@@ -207,7 +190,7 @@ mod tests {
     fn the_loopback_returns_the_edge_payloads_whole_up_to_the_message() {
         let transport = DnsTransport::loopback();
         assert_eq!(transport.ceiling(), Some(message_ceiling()));
-        for (name, bytes) in edges() {
+        for (name, bytes) in edge_payloads() {
             assert!(transport.refuses(&bytes).is_none(), "{name}");
             let arrived = transport
                 .round(&bytes)
