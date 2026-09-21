@@ -140,14 +140,9 @@ impl DnsTransport {
     /// # Errors
     /// Where the connection could not be accepted, or what came is not DNS.
     pub fn receive_connection(&self, listener: &TcpListener) -> Result<Arrived> {
-        let (mut stream, peer) = listener
-            .accept()
-            .map_err(|e| classify("accepting a connection", &e))?;
-        if let Some(timeout) = self.timeout {
-            stream
-                .set_read_timeout(Some(timeout))
-                .map_err(|e| classify("setting the read timeout", &e))?;
-        }
+        // The wait for the connection is bounded as well as the reads. It was
+        // bare until 2026-09-21, and a far end nobody reached waited for good.
+        let (mut stream, peer) = socket::accept_tcp(listener, self.timeout)?;
         loop {
             let message = read_framed(&mut stream)?;
             let (rcode, arrived) = self.judge(peer, &message);
@@ -212,11 +207,10 @@ impl DnsTransport {
             }
             Carrier::Tcp => {
                 let bytes = message::encode(&update)?;
-                let mut stream = TcpStream::connect(address)
-                    .map_err(|e| classify("connecting to the server", &e))?;
-                stream
-                    .set_read_timeout(self.timeout)
-                    .map_err(|e| classify("setting the answer timeout", &e))?;
+                // The connect is bounded as well as the reads. It was bare
+                // until 2026-09-21, and a machine out of ephemeral ports
+                // waited without end.
+                let mut stream = socket::connect_tcp(address, self.timeout)?;
                 write_framed(&mut stream, &bytes)?;
                 read_framed(&mut stream)?
             }
