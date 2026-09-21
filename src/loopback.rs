@@ -8,13 +8,16 @@
 //! message's own sixteen-bit length, less what the update spends on the
 //! zone question, the record's name and the TXT string lengths.
 
-use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::sync::{OnceLock, mpsc};
+use std::net::{TcpListener, UdpSocket};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use transport::Arrived;
 use transport::Transport;
-use transport::error::{Result, protocol_error};
+use transport::error::{Result, TransportError, protocol_error};
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
+use transport::socket;
 
 use crate::message::{self, MAX_MESSAGE, Message, UDP_EDNS};
 use crate::{Carrier, DnsTransport};
@@ -101,6 +104,12 @@ impl FarEnd for Serving {
             listener,
             address,
         } = *self;
+        // Each carrier bounds its own wait by the transport's timeout, so
+        // the first verdict comes inside it. The channel is bounded as well,
+        // one loopback timeout past that, because a far end built from a
+        // transport with no timeout would otherwise wait here for good; it
+        // was unbounded until 2026-09-21.
+        let within = transport.timeout.unwrap_or(LOOPBACK_TIMEOUT) + LOOPBACK_TIMEOUT;
         let (tell, told) = mpsc::channel();
         let over_udp = {
             let tell = tell.clone();
@@ -109,13 +118,17 @@ impl FarEnd for Serving {
         };
         let over_tcp =
             std::thread::spawn(move || drop(tell.send(transport.receive_connection(&listener))));
-        let first = told
-            .recv()
-            .map_err(|_| protocol_error("neither carrier took an update"))?;
+        let first = told.recv_timeout(within).map_err(|e| match e {
+            RecvTimeoutError::Timeout => TransportError::retryable(format!(
+                "neither carrier took an update within {} ms",
+                within.as_millis()
+            )),
+            RecvTimeoutError::Disconnected => protocol_error("neither carrier took an update"),
+        });
         wake(&address);
         drop(over_udp.join());
         drop(over_tcp.join());
-        first
+        first?
     }
 }
 
@@ -126,7 +139,13 @@ fn wake(address: &str) {
     if let Ok(poke) = UdpSocket::bind("127.0.0.1:0") {
         drop(poke.send_to(&[0], address));
     }
-    drop(TcpStream::connect(address));
+    // The far end now bounds its own accept, so the poke only needs to be
+    // quick. It was bare until 2026-09-21, and under port exhaustion an
+    // unbounded one waited on Windows' own SYN schedule, some 21 seconds.
+    drop(socket::connect_tcp(
+        address,
+        Some(Duration::from_millis(250)),
+    ));
 }
 
 impl Loopback for DnsTransport {
