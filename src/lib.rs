@@ -23,6 +23,7 @@
 
 pub mod loopback;
 pub mod message;
+pub mod record;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -346,8 +347,8 @@ mod tests {
                 flags: 0,
                 questions: vec![message::Question {
                     name: "xmip.example.".into(),
-                    kind: message::TYPE_TXT,
-                    class: message::CLASS_IN,
+                    kind: record::TYPE_TXT,
+                    class: record::CLASS_IN,
                 }],
                 answers: Vec::new(),
                 authority: Vec::new(),

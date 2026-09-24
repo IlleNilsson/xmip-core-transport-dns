@@ -1,6 +1,6 @@
 # xmip-core-transport-dns
 
-DNS transport: one dynamic update is one Stream, its TXT payload the bytes and the zone and name the address; UDP with EDNS or TCP. RFC 1035 and RFC 2136. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
+DNS transport: one dynamic update is one Stream, its TXT payload the bytes and the zone and name the address; UDP with EDNS or TCP. RFC 1035 and RFC 2136. Its message codec is the estate's one DNS codec, which the mdns technology reads and writes through. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
 ## Toolchain
 
