@@ -1,10 +1,17 @@
 //! RFC 1035 section 4: the header, questions and resource records — and
 //! the RFC 2136 UPDATE that reuses the four sections as zone, prerequisite,
-//! update and additional. A name's label-and-pointer form is the
-//! capability's, shared with mdns (ADR-0044).
+//! update and additional. The one DNS message codec in the estate: mdns
+//! speaks RFC 6762, which is this wire format with two bits repurposed, and
+//! reads and writes its messages here. A name's label-and-pointer form is
+//! the capability's (ADR-0044); a record and what it carries are
+//! [`crate::record`]'s.
 
 use transport::error::{Result, protocol_error};
 use transport::label::{read_name, write_name};
+
+use crate::record::{
+    CLASS_IN, Record, RecordData, TYPE_OPT, TYPE_SOA, TYPE_TXT, field16, rdata, read_record,
+};
 
 /// The largest message a UDP datagram carries without EDNS.
 pub const UDP_CLASSIC: usize = 512;
@@ -13,13 +20,10 @@ pub const UDP_EDNS: usize = 4096;
 /// The largest message at all: what a TCP length prefix can say.
 pub const MAX_MESSAGE: usize = 65_535;
 
-pub const TYPE_SOA: u16 = 6;
-pub const TYPE_TXT: u16 = 16;
-pub const TYPE_OPT: u16 = 41;
-pub const TYPE_ANY: u16 = 255;
-pub const CLASS_IN: u16 = 1;
-pub const CLASS_ANY: u16 = 255;
-
+/// The header's QR bit: this is a response.
+pub const FLAG_RESPONSE: u16 = 0x8000;
+/// The header's AA bit: the answer is authoritative.
+pub const FLAG_AUTHORITATIVE: u16 = 0x0400;
 pub const OPCODE_QUERY: u16 = 0;
 pub const OPCODE_UPDATE: u16 = 5;
 pub const RCODE_NOERROR: u16 = 0;
@@ -28,25 +32,21 @@ pub const RCODE_SERVFAIL: u16 = 2;
 pub const RCODE_NOTIMP: u16 = 4;
 pub const RCODE_REFUSED: u16 = 5;
 
+/// A character string's most bytes, RFC 1035 section 3.3.
+const STRING: usize = 255;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Question {
     pub name: String,
     pub kind: u16,
+    /// `CLASS_IN`, with [`BIT_UNICAST`](crate::record::BIT_UNICAST) where
+    /// mDNS asks a unicast answer.
     pub class: u16,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub name: String,
-    pub kind: u16,
-    pub class: u16,
-    pub ttl: u32,
-    pub rdata: Vec<u8>,
 }
 
 /// One message, its four sections by their RFC 1035 names. An UPDATE reads
 /// them as zone, prerequisite, update and additional.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct Message {
     pub id: u16,
     pub flags: u16,
@@ -57,17 +57,39 @@ pub struct Message {
 }
 
 impl Message {
+    /// A query for `kind` records at `name`, id 0 as mDNS queries carry;
+    /// a unicast resolver sets its own.
+    #[must_use]
+    pub fn query(name: &str, kind: u16) -> Self {
+        Self {
+            questions: vec![Question {
+                name: name.to_string(),
+                kind,
+                class: CLASS_IN,
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// An authoritative response carrying `answers` — unsolicited, an mDNS
+    /// announcement, when `id` is 0.
+    #[must_use]
+    pub fn authoritative(id: u16, answers: Vec<Record>) -> Self {
+        Self {
+            id,
+            flags: FLAG_RESPONSE | FLAG_AUTHORITATIVE,
+            answers,
+            ..Self::default()
+        }
+    }
+
     /// An UPDATE adding one TXT record `name` in `zone` carrying `payload`,
     /// split into the 255-byte character strings TXT is made of.
     #[must_use]
     pub fn update_adding_txt(id: u16, zone: &str, name: &str, payload: &[u8]) -> Self {
-        let mut rdata = Vec::with_capacity(payload.len() + payload.len() / 255 + 1);
-        for chunk in payload.chunks(255) {
-            rdata.push(u8::try_from(chunk.len()).unwrap_or(255));
-            rdata.extend_from_slice(chunk);
-        }
-        if payload.is_empty() {
-            rdata.push(0);
+        let mut strings: Vec<Vec<u8>> = payload.chunks(STRING).map(<[u8]>::to_vec).collect();
+        if strings.is_empty() {
+            strings.push(Vec::new());
         }
         Self {
             id,
@@ -77,15 +99,14 @@ impl Message {
                 kind: TYPE_SOA,
                 class: CLASS_IN,
             }],
-            answers: Vec::new(),
             authority: vec![Record {
                 name: name.to_string(),
                 kind: TYPE_TXT,
                 class: CLASS_IN,
                 ttl: 0,
-                rdata,
+                data: RecordData::Txt(strings),
             }],
-            additional: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -98,7 +119,7 @@ impl Message {
     /// Whether this is a response, bit 15.
     #[must_use]
     pub const fn is_response(&self) -> bool {
-        self.flags & 0x8000 != 0
+        self.flags & FLAG_RESPONSE != 0
     }
 
     /// The response code, the low four bits.
@@ -107,21 +128,28 @@ impl Message {
         self.flags & 0x0f
     }
 
+    /// Every record in every section, in order.
+    pub fn records(&self) -> impl Iterator<Item = &Record> + Clone {
+        self.answers
+            .iter()
+            .chain(&self.authority)
+            .chain(&self.additional)
+    }
+
     /// The payload the TXT records of the update section carry, their
     /// character strings concatenated in order.
     #[must_use]
     pub fn txt_payload(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        for record in self.authority.iter().filter(|r| r.kind == TYPE_TXT) {
-            let mut at = 0;
-            while at < record.rdata.len() {
-                let length = usize::from(record.rdata[at]);
-                let end = (at + 1 + length).min(record.rdata.len());
-                out.extend_from_slice(&record.rdata[at + 1..end]);
-                at = end;
-            }
-        }
-        out
+        self.authority
+            .iter()
+            .filter_map(|record| match &record.data {
+                RecordData::Txt(strings) => Some(strings),
+                _ => None,
+            })
+            .flatten()
+            .flatten()
+            .copied()
+            .collect()
     }
 
     /// The response to `self`: same id, opcode and question, `rcode` set.
@@ -129,11 +157,9 @@ impl Message {
     pub fn response(&self, rcode: u16) -> Self {
         Self {
             id: self.id,
-            flags: 0x8000 | (self.flags & 0x7800) | (rcode & 0x0f),
+            flags: FLAG_RESPONSE | (self.flags & 0x7800) | (rcode & 0x0f),
             questions: self.questions.clone(),
-            answers: Vec::new(),
-            authority: Vec::new(),
-            additional: Vec::new(),
+            ..Self::default()
         }
     }
 
@@ -146,7 +172,7 @@ impl Message {
             kind: TYPE_OPT,
             class: u16::try_from(UDP_EDNS).unwrap_or(u16::MAX),
             ttl: 0,
-            rdata: Vec::new(),
+            data: RecordData::Other(Vec::new()),
         });
         self
     }
@@ -156,8 +182,8 @@ impl Message {
 /// written, which every resolver accepts.
 ///
 /// # Errors
-/// A label over 63 bytes, a name over 255, rdata over 65535, or a message
-/// over [`MAX_MESSAGE`].
+/// A label over 63 bytes, a name over 255, a TXT string over 255, rdata
+/// over 65535, or a message over [`MAX_MESSAGE`].
 pub fn encode(message: &Message) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     for value in [message.id, message.flags] {
@@ -177,18 +203,16 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
         out.extend_from_slice(&question.kind.to_be_bytes());
         out.extend_from_slice(&question.class.to_be_bytes());
     }
-    for record in [&message.answers, &message.authority, &message.additional]
-        .into_iter()
-        .flatten()
-    {
+    for record in message.records() {
         write_name(&mut out, &record.name)?;
         out.extend_from_slice(&record.kind.to_be_bytes());
         out.extend_from_slice(&record.class.to_be_bytes());
         out.extend_from_slice(&record.ttl.to_be_bytes());
-        let length = u16::try_from(record.rdata.len())
+        let rdata = rdata(&record.data)?;
+        let length = u16::try_from(rdata.len())
             .map_err(|_| protocol_error("rdata over what a record carries"))?;
         out.extend_from_slice(&length.to_be_bytes());
-        out.extend_from_slice(&record.rdata);
+        out.extend_from_slice(&rdata);
     }
     if out.len() > MAX_MESSAGE {
         return Err(protocol_error("a message over what DNS can frame"));
@@ -200,55 +224,41 @@ pub fn encode(message: &Message) -> Result<Vec<u8>> {
 ///
 /// # Errors
 /// Shorter than its header, a section shorter than its count, a
-/// compression pointer that loops or points forward, a label over 63.
+/// compression pointer that loops or points forward, a label over 63, or
+/// class IN rdata of a known type that is not shaped as that type.
 pub fn decode(bytes: &[u8]) -> Result<Message> {
     if bytes.len() < 12 {
         return Err(protocol_error("a message shorter than its header"));
     }
-    let u16_at = |at: usize| u16::from_be_bytes([bytes[at], bytes[at + 1]]);
-    let counts = [u16_at(4), u16_at(6), u16_at(8), u16_at(10)];
+    let counts = [
+        field16(bytes, 4)?,
+        field16(bytes, 6)?,
+        field16(bytes, 8)?,
+        field16(bytes, 10)?,
+    ];
     let mut at = 12;
     let mut questions = Vec::new();
     for _ in 0..counts[0] {
         let (text, next) = read_name(bytes, at)?;
-        let kind = field16(bytes, next)?;
-        let class = field16(bytes, next + 2)?;
         questions.push(Question {
             name: text,
-            kind,
-            class,
+            kind: field16(bytes, next)?,
+            class: field16(bytes, next + 2)?,
         });
         at = next + 4;
     }
     let mut sections: [Vec<Record>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     for (section, count) in sections.iter_mut().zip(&counts[1..]) {
         for _ in 0..*count {
-            let (text, next) = read_name(bytes, at)?;
-            let kind = field16(bytes, next)?;
-            let class = field16(bytes, next + 2)?;
-            let ttl = u32::from_be_bytes([
-                *bytes.get(next + 4).ok_or_else(short)?,
-                *bytes.get(next + 5).ok_or_else(short)?,
-                *bytes.get(next + 6).ok_or_else(short)?,
-                *bytes.get(next + 7).ok_or_else(short)?,
-            ]);
-            let length = usize::from(field16(bytes, next + 8)?);
-            let start = next + 10;
-            let rdata = bytes.get(start..start + length).ok_or_else(short)?.to_vec();
-            section.push(Record {
-                name: text,
-                kind,
-                class,
-                ttl,
-                rdata,
-            });
-            at = start + length;
+            let (record, next) = read_record(bytes, at)?;
+            section.push(record);
+            at = next;
         }
     }
     let [answers, authority, additional] = sections;
     Ok(Message {
-        id: u16_at(0),
-        flags: u16_at(2),
+        id: field16(bytes, 0)?,
+        flags: field16(bytes, 2)?,
         questions,
         answers,
         authority,
@@ -256,18 +266,21 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
     })
 }
 
-fn short() -> transport::TransportError {
-    protocol_error("a section shorter than its count")
-}
-
-fn field16(bytes: &[u8], at: usize) -> Result<u16> {
-    let pair = bytes.get(at..at + 2).ok_or_else(short)?;
-    Ok(u16::from_be_bytes([pair[0], pair[1]]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::record::{BIT_UNICAST, CLASS_ANY, TYPE_A, TYPE_AAAA, TYPE_PTR, TYPE_SRV};
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    fn record(name: &str, kind: u16, data: RecordData) -> Record {
+        Record {
+            name: name.to_string(),
+            kind,
+            class: CLASS_IN | BIT_UNICAST,
+            ttl: 120,
+            data,
+        }
+    }
 
     #[test]
     fn an_update_round_trips_and_its_payload_reads_back() {
@@ -283,15 +296,18 @@ mod tests {
         assert!(!back.is_response());
         assert_eq!(back.txt_payload(), payload);
         assert_eq!(back.questions[0].name, "xmip.example.");
-        assert_eq!(back.authority[0].rdata.len(), 600 + 3);
-        let empty = Message::update_adding_txt(1, "z.", "n", &[]);
-        assert!(
-            decode(&encode(&empty).expect("encode"))
-                .expect("decode")
-                .txt_payload()
-                .is_empty()
+        let RecordData::Txt(strings) = &back.authority[0].data else {
+            panic!("a TXT record");
+        };
+        assert_eq!(
+            strings.iter().map(Vec::len).collect::<Vec<_>>(),
+            [255, 255, 90]
         );
-        let response = back.response(RCODE_REFUSED);
+        let empty = Message::update_adding_txt(1, "z.", "n.", &[]);
+        let back = decode(&encode(&empty).expect("encode")).expect("decode");
+        assert_eq!(back, empty, "one empty string, as RFC 6763 6.1 writes it");
+        assert!(back.txt_payload().is_empty());
+        let response = update.response(RCODE_REFUSED);
         assert!(response.is_response());
         assert_eq!(response.rcode(), RCODE_REFUSED);
         assert_eq!(response.opcode(), OPCODE_UPDATE);
@@ -299,22 +315,109 @@ mod tests {
     }
 
     #[test]
-    fn compression_pointers_are_followed_and_loops_refused() {
-        // A query for a.b. then an answer whose name points back at it.
-        let mut bytes = vec![0, 1, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0];
-        bytes.extend_from_slice(&[1, b'a', 1, b'b', 0, 0, 16, 0, 1]);
-        bytes.extend_from_slice(&[0xc0, 12, 0, 16, 0, 1, 0, 0, 0, 5, 0, 3, 2, b'h', b'i']);
+    fn a_service_response_round_trips() {
+        let response = Message::authoritative(
+            0,
+            vec![
+                record(
+                    "_ipp._tcp.local.",
+                    TYPE_PTR,
+                    RecordData::Ptr("Printer._ipp._tcp.local.".into()),
+                ),
+                record(
+                    "Printer._ipp._tcp.local.",
+                    TYPE_SRV,
+                    RecordData::Srv {
+                        priority: 0,
+                        weight: 0,
+                        port: 631,
+                        target: "printer.local.".into(),
+                    },
+                ),
+                record(
+                    "Printer._ipp._tcp.local.",
+                    TYPE_TXT,
+                    RecordData::Txt(vec![b"txtvers=1".to_vec(), Vec::new(), vec![0xff]]),
+                ),
+                record(
+                    "printer.local.",
+                    TYPE_A,
+                    RecordData::A(Ipv4Addr::new(10, 0, 0, 5)),
+                ),
+                record(
+                    "printer.local.",
+                    TYPE_AAAA,
+                    RecordData::Aaaa(Ipv6Addr::LOCALHOST),
+                ),
+                record("printer.local.", 47, RecordData::Other(vec![1, 2, 3])),
+            ],
+        );
+        let back = decode(&encode(&response).expect("encode")).expect("decode");
+        assert_eq!(back, response, "every string kept, the empty one and bytes");
+        assert!(back.is_response());
+        assert_eq!(back.records().count(), 6);
+        let query = Message::query("_ipp._tcp.local.", TYPE_PTR);
+        let back = decode(&encode(&query).expect("encode")).expect("decode");
+        assert_eq!(back, query);
+        assert!(!back.is_response());
+    }
+
+    #[test]
+    fn rdata_outside_class_in_keeps_its_bytes() {
+        // RFC 2136 2.5.2: delete an RRset — class ANY, type A, no rdata.
+        let mut update = Message::update_adding_txt(1, "z.", "n.", b"x");
+        update.authority.push(Record {
+            name: "n.".into(),
+            kind: TYPE_A,
+            class: CLASS_ANY,
+            ttl: 0,
+            data: RecordData::Other(Vec::new()),
+        });
+        let back = decode(&encode(&update).expect("encode")).expect("decode");
+        assert_eq!(back, update);
+        assert_eq!(back.txt_payload(), b"x");
+    }
+
+    #[test]
+    fn compression_is_followed_in_names_and_rdata_and_bad_shapes_refused() {
+        // A question for a.b., a PTR answer whose name and target point at it.
+        let mut bytes = vec![0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0];
+        bytes.extend_from_slice(&[1, b'a', 1, b'b', 0, 0, 12, 0, 1]);
+        bytes.extend_from_slice(&[0xc0, 12, 0, 12, 0, 1, 0, 0, 0, 5, 0, 4, 1, b'x', 0xc0, 12]);
         let message = decode(&bytes).expect("decode");
         assert_eq!(message.answers[0].name, "a.b.");
         assert_eq!(message.answers[0].ttl, 5);
-        assert_eq!(message.answers[0].rdata, [2, b'h', b'i']);
+        assert_eq!(message.answers[0].data, RecordData::Ptr("x.a.b.".into()));
         let mut looping = bytes.clone();
         looping[21] = 21; // points at itself
-        assert!(decode(&looping).is_err());
+        assert!(decode(&looping).is_err(), "pointer at itself");
         assert!(decode(&bytes[..11]).is_err(), "short header");
-        assert!(decode(&bytes[..20]).is_err(), "short section");
+        assert!(decode(&bytes[..25]).is_err(), "short section");
+        let short_a =
+            Message::authoritative(0, vec![record("n.", TYPE_A, RecordData::Other(vec![1]))]);
+        assert!(
+            decode(&encode(&short_a).expect("encode")).is_err(),
+            "A of one byte"
+        );
+        // A TXT string cut short was read as far as it went until 2026-09-24.
+        let bad_txt = Message::authoritative(
+            0,
+            vec![record("n.", TYPE_TXT, RecordData::Other(vec![5, b'a']))],
+        );
+        assert!(
+            decode(&encode(&bad_txt).expect("encode")).is_err(),
+            "TXT string cut"
+        );
         let long_label = "x".repeat(64);
-        assert!(encode(&Message::update_adding_txt(1, &long_label, "n", b"")).is_err());
+        assert!(encode(&Message::query(&long_label, TYPE_PTR)).is_err());
+        let long_txt = RecordData::Txt(vec![vec![b'y'; 256]]);
+        assert!(
+            encode(&Message::authoritative(
+                0,
+                vec![record("n.", TYPE_TXT, long_txt)]
+            ))
+            .is_err()
+        );
         let too_big = Message::update_adding_txt(1, "z.", "n", &vec![0; 70_000]);
         assert!(encode(&too_big).is_err());
     }

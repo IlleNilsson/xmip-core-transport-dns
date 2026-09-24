@@ -11,13 +11,12 @@
 use std::net::{TcpListener, UdpSocket};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
 
-use transport::Arrived;
 use transport::Transport;
+use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
-use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback};
-use transport::socket;
+use transport::held::Held;
+use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback, poke};
 
 use crate::message::{self, MAX_MESSAGE, Message, UDP_EDNS};
 use crate::{Carrier, DnsTransport};
@@ -80,58 +79,6 @@ impl DnsTransport {
     }
 }
 
-/// A server on one port over both carriers, waiting for its one update.
-struct Serving {
-    transport: DnsTransport,
-    socket: UdpSocket,
-    listener: TcpListener,
-    address: String,
-}
-
-impl FarEnd for Serving {
-    fn address(&self) -> &str {
-        &self.address
-    }
-
-    /// Each carrier waits on its own thread; the first to take an update
-    /// answers for the round, and the other is woken with bytes that are
-    /// not DNS so the far end is gone when the round is judged rather than
-    /// a timeout later.
-    fn take_one(self: Box<Self>) -> Result<Arrived> {
-        let Self {
-            transport,
-            socket,
-            listener,
-            address,
-        } = *self;
-        // Each carrier bounds its own wait by the transport's timeout, so
-        // the first verdict comes inside it. The channel is bounded as well,
-        // one loopback timeout past that, because a far end built from a
-        // transport with no timeout would otherwise wait here for good; it
-        // was unbounded until 2026-09-21.
-        let within = transport.timeout.unwrap_or(LOOPBACK_TIMEOUT) + LOOPBACK_TIMEOUT;
-        let (tell, told) = mpsc::channel();
-        let over_udp = {
-            let tell = tell.clone();
-            let transport = transport.clone();
-            std::thread::spawn(move || drop(tell.send(transport.receive_datagram(&socket))))
-        };
-        let over_tcp =
-            std::thread::spawn(move || drop(tell.send(transport.receive_connection(&listener))));
-        let first = told.recv_timeout(within).map_err(|e| match e {
-            RecvTimeoutError::Timeout => TransportError::retryable(format!(
-                "neither carrier took an update within {} ms",
-                within.as_millis()
-            )),
-            RecvTimeoutError::Disconnected => protocol_error("neither carrier took an update"),
-        });
-        wake(&address);
-        drop(over_udp.join());
-        drop(over_tcp.join());
-        first?
-    }
-}
-
 /// Reach the carrier still waiting: a byte that is not a message on the
 /// socket, a connection with nothing in it on the listener. The one that
 /// already answered ignores both.
@@ -139,13 +86,7 @@ fn wake(address: &str) {
     if let Ok(poke) = UdpSocket::bind("127.0.0.1:0") {
         drop(poke.send_to(&[0], address));
     }
-    // The far end now bounds its own accept, so the poke only needs to be
-    // quick. It was bare until 2026-09-21, and under port exhaustion an
-    // unbounded one waited on Windows' own SYN schedule, some 21 seconds.
-    drop(socket::connect_tcp(
-        address,
-        Some(Duration::from_millis(250)),
-    ));
+    poke(address);
 }
 
 impl Loopback for DnsTransport {
@@ -153,27 +94,54 @@ impl Loopback for DnsTransport {
         Some(message_ceiling())
     }
 
+    /// A server on one port over both carriers, waiting for its one
+    /// update. Each carrier waits on its own thread; the first to take an
+    /// update answers for the round, and the other is woken with bytes that
+    /// are not DNS so the far end is gone when the round is judged rather
+    /// than a timeout later.
     fn far_end(&self) -> Result<Box<dyn FarEnd>> {
         let (socket, listener, address) = self.bind_both()?;
-        Ok(Box::new(Serving {
-            transport: self.clone(),
-            socket,
-            listener,
-            address,
-        }))
+        let transport = self.clone();
+        let woken = address.clone();
+        Ok(Box::new(Held::new(address, move || {
+            // Each carrier bounds its own wait by the transport's timeout, so
+            // the first verdict comes inside it. The channel is bounded as
+            // well, one loopback timeout past that, because a far end built
+            // from a transport with no timeout would otherwise wait here for
+            // good; it was unbounded until 2026-09-21.
+            let within = transport.timeout.unwrap_or(LOOPBACK_TIMEOUT) + LOOPBACK_TIMEOUT;
+            let (tell, told) = mpsc::channel();
+            let over_udp = {
+                let tell = tell.clone();
+                let transport = transport.clone();
+                std::thread::spawn(move || drop(tell.send(transport.receive_datagram(&socket))))
+            };
+            let over_tcp = std::thread::spawn(move || {
+                drop(tell.send(transport.receive_connection(&listener)));
+            });
+            let first = told.recv_timeout(within).map_err(|e| match e {
+                RecvTimeoutError::Timeout => TransportError::retryable(format!(
+                    "neither carrier took an update within {} ms",
+                    within.as_millis()
+                )),
+                RecvTimeoutError::Disconnected => protocol_error("neither carrier took an update"),
+            });
+            wake(&woken);
+            drop(over_udp.join());
+            drop(over_tcp.join());
+            first?
+        })))
     }
 
     /// Under the datagram ceiling the update goes as UDP with EDNS; above
     /// it, as TCP with a length prefix; past the message ceiling nothing
     /// goes, and the refusal says so before anything is sent.
     fn send_to(&self, address: &str, payload: &[u8]) -> Result<()> {
-        if payload.len() > message_ceiling() {
-            return Err(protocol_error(format!(
-                "{} bytes is over the {} one update carries in a message",
-                payload.len(),
-                message_ceiling()
-            )));
-        }
+        ceiling::within(
+            payload.len(),
+            message_ceiling(),
+            "one update carries in a message",
+        )?;
         let carrier = if payload.len() <= datagram_ceiling() {
             Carrier::Udp
         } else {
