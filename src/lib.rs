@@ -33,6 +33,7 @@ use std::time::Duration;
 pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
 use transport::error::{Result, classify, protocol_error};
+use transport::kept::Kept;
 use transport::sender::Sender;
 use transport::socket;
 use transport::{Arrived, Configured, Directions, Transport};
@@ -54,6 +55,10 @@ pub struct DnsTransport {
     next_id: AtomicU16,
     /// The socket every update over UDP leaves from, bound once.
     sender: Sender,
+    /// What the first receive binds for the carrier, and every receive
+    /// takes from: the datagram socket, or the listener.
+    datagrams: Kept<UdpSocket>,
+    connections: Kept<TcpListener>,
 }
 
 impl Clone for DnsTransport {
@@ -68,6 +73,8 @@ impl Clone for DnsTransport {
             timeout: self.timeout,
             next_id: AtomicU16::new(self.next_id.load(Ordering::Relaxed)),
             sender: self.sender.clone(),
+            datagrams: self.datagrams.clone(),
+            connections: self.connections.clone(),
         }
     }
 }
@@ -85,6 +92,8 @@ impl DnsTransport {
             timeout: None,
             next_id: AtomicU16::new(1),
             sender: Sender::new(),
+            datagrams: Kept::new(),
+            connections: Kept::new(),
         }
     }
 
@@ -284,15 +293,17 @@ impl Transport for DnsTransport {
         Directions::BOTH
     }
 
+    /// One update, from the socket or listener the first receive bound and
+    /// kept: what arrived between two receives waits there.
     fn receive(&self) -> Result<Vec<Arrived>> {
         match self.carrier {
             Carrier::Udp => {
-                let (socket, _) = self.bind_udp()?;
-                Ok(vec![self.receive_datagram(&socket)?])
+                let socket = self.datagrams.bound(|| self.bind_udp())?;
+                Ok(vec![self.receive_datagram(socket)?])
             }
             Carrier::Tcp => {
-                let (listener, _) = self.bind_tcp()?;
-                Ok(vec![self.receive_connection(&listener)?])
+                let listener = self.connections.bound(|| self.bind_tcp())?;
+                Ok(vec![self.receive_connection(listener)?])
             }
         }
     }
@@ -392,6 +403,30 @@ mod tests {
     fn node() -> DnsTransport {
         DnsTransport::new("127.0.0.1:0", "xmip.example.", "probe.xmip.example.")
             .timing_out_after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn every_receive_takes_from_what_the_first_bound_over_either_carrier() {
+        let over_udp = DnsTransport::loopback();
+        over_udp
+            .datagrams
+            .bound(|| over_udp.bind_udp())
+            .expect("bound");
+        let address = over_udp.datagrams.address().expect("address");
+        transport::kept::held_across_receives(&over_udp, address, 5, |at, payload| {
+            DnsTransport::loopback().send(at, payload)
+        });
+        let over_tcp = DnsTransport::loopback().over(Carrier::Tcp);
+        over_tcp
+            .connections
+            .bound(|| over_tcp.bind_tcp())
+            .expect("bound");
+        let address = over_tcp.connections.address().expect("address");
+        transport::kept::held_across_receives(&over_tcp, address, 5, |at, payload| {
+            DnsTransport::loopback()
+                .over(Carrier::Tcp)
+                .send(at, payload)
+        });
     }
 
     #[test]
