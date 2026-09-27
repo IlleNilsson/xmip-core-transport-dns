@@ -33,6 +33,7 @@ use std::time::Duration;
 pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
 use transport::error::{Result, classify, protocol_error};
+use transport::sender::Sender;
 use transport::socket;
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
@@ -51,6 +52,8 @@ pub struct DnsTransport {
     carrier: Carrier,
     timeout: Option<Duration>,
     next_id: AtomicU16,
+    /// The socket every update over UDP leaves from, bound once.
+    sender: Sender,
 }
 
 impl Clone for DnsTransport {
@@ -64,6 +67,7 @@ impl Clone for DnsTransport {
             carrier: self.carrier,
             timeout: self.timeout,
             next_id: AtomicU16::new(self.next_id.load(Ordering::Relaxed)),
+            sender: self.sender.clone(),
         }
     }
 }
@@ -80,6 +84,7 @@ impl DnsTransport {
             carrier: Carrier::Udp,
             timeout: None,
             next_id: AtomicU16::new(1),
+            sender: Sender::new(),
         }
     }
 
@@ -193,19 +198,19 @@ impl DnsTransport {
                         "an update over what a UDP datagram carries; use TCP",
                     ));
                 }
-                let socket = UdpSocket::bind("0.0.0.0:0")
-                    .map_err(|e| classify("binding the sending socket", &e))?;
-                socket
-                    .set_read_timeout(self.timeout)
-                    .map_err(|e| classify("setting the answer timeout", &e))?;
-                socket
-                    .send_to(&bytes, address)
-                    .map_err(|e| classify("sending the update", &e))?;
-                let mut buffer = vec![0u8; UDP_EDNS];
-                let read = socket
-                    .recv(&mut buffer)
-                    .map_err(|e| classify("awaiting the answer", &e))?;
-                message::decode(&buffer[..read])?
+                self.sender.exchange(address, |socket, peer| {
+                    socket
+                        .set_read_timeout(self.timeout)
+                        .map_err(|e| classify("setting the answer timeout", &e))?;
+                    socket
+                        .send_to(&bytes, peer)
+                        .map_err(|e| classify("sending the update", &e))?;
+                    let mut buffer = vec![0u8; UDP_EDNS];
+                    let read = socket
+                        .recv(&mut buffer)
+                        .map_err(|e| classify("awaiting the answer", &e))?;
+                    message::decode(&buffer[..read])
+                })?
             }
             Carrier::Tcp => {
                 let bytes = message::encode(&update)?;
