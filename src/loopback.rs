@@ -17,6 +17,7 @@ use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::held::Held;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback, poke};
+use transport::socket;
 
 use crate::message::{self, MAX_MESSAGE, Message, UDP_EDNS};
 use crate::{Carrier, DnsTransport};
@@ -64,12 +65,14 @@ impl DnsTransport {
     }
 
     /// The datagram socket and the listener on one port, as a name server
-    /// has them. The port is the kernel's choice for the socket; where the
-    /// listener cannot follow it, another is asked for.
+    /// has them. The port is the kernel's choice for the listener, and the
+    /// socket follows it: a busy machine holds its TCP ports in `TIME_WAIT` by
+    /// the thousand, so a free TCP port is the scarce one, and a UDP port
+    /// beside it is almost always free.
     fn bind_both(&self) -> Result<(UdpSocket, TcpListener, String)> {
         for _ in 0..16 {
-            let (socket, address) = self.bind_udp()?;
-            if let Ok(listener) = TcpListener::bind(&address) {
+            let (listener, address) = self.bind_tcp()?;
+            if let Ok((socket, _)) = socket::bind_udp(&address, self.timeout) {
                 return Ok((socket, listener, address));
             }
         }
