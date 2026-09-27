@@ -34,7 +34,8 @@ pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
 use transport::error::{Result, classify, protocol_error};
 use transport::socket;
-use transport::{Arrived, Directions, Transport};
+use transport::{Arrived, Configured, Directions, Transport};
+use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
 
 /// UDP datagrams with EDNS, or TCP with a length prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,9 +297,92 @@ impl Transport for DnsTransport {
     }
 }
 
+impl Configured for DnsTransport {
+    /// The address is where a Receive Location listens for updates —
+    /// `0.0.0.0:53` the standard port; a Send Location updates the server its
+    /// target gives.
+    const SETTINGS: &'static Settings = &Settings {
+        technology: env!("CARGO_PKG_NAME"),
+        settings: &[
+            Setting {
+                name: "zone",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The zone updates are taken for or sent to where the target names \
+                          none; a Receive Location without one takes every zone.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "name",
+                kind: Kind::Text,
+                presence: Presence::Optional,
+                meaning: "The owner name an update adds its TXT record under where the target \
+                          names none.",
+                applies: Applies::Send,
+            },
+            Setting {
+                name: "carrier",
+                kind: Kind::Choice {
+                    choices: &["udp", "tcp"],
+                },
+                presence: Presence::Optional,
+                meaning: "Whether messages travel as UDP datagrams with EDNS or over TCP with a \
+                          length prefix; udp when left out.",
+                applies: Applies::Both,
+            },
+            Setting {
+                name: "timeout",
+                kind: Kind::Duration,
+                presence: Presence::Optional,
+                meaning: "How long an update or an answer is waited for; unbounded when left \
+                          out.",
+                applies: Applies::Both,
+            },
+        ],
+    };
+
+    fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
+        let zone = settings.optional_text("zone").unwrap_or_default();
+        let name = settings.optional_text("name").unwrap_or_default();
+        let mut transport = Self::new(address, zone, name);
+        if settings.optional_text("carrier") == Some("tcp") {
+            transport = transport.over(Carrier::Tcp);
+        }
+        if let Some(timeout) = settings.optional_duration("timeout") {
+            transport = transport.timing_out_after(timeout);
+        }
+        Ok(transport)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xcore::settings::Given;
+
+    #[test]
+    fn dns_declares_its_settings_and_reads_through_them() {
+        assert_eq!(DnsTransport::SETTINGS.problems(), Vec::<String>::new());
+        let given = [
+            ("zone".to_string(), Given::Text("example.com.".to_string())),
+            (
+                "name".to_string(),
+                Given::Text("feed.example.com.".to_string()),
+            ),
+            ("carrier".to_string(), Given::Text("tcp".to_string())),
+        ];
+        let built = DnsTransport::open("0.0.0.0:0", Applies::Send, &given).expect("built");
+        assert_eq!(built.zone, "example.com.");
+        assert_eq!(built.name, "feed.example.com.");
+        assert_eq!(built.carrier, Carrier::Tcp);
+        let built = DnsTransport::open("0.0.0.0:53", Applies::Receive, &[]).expect("built");
+        assert_eq!(built.carrier, Carrier::Udp);
+        let given = [("name".to_string(), Given::Text("feed.".to_string()))];
+        let Err(refused) = DnsTransport::open("0.0.0.0:53", Applies::Receive, &given) else {
+            panic!("name is a send setting");
+        };
+        assert!(refused.message.contains("\"name\""), "{}", refused.message);
+    }
 
     fn node() -> DnsTransport {
         DnsTransport::new("127.0.0.1:0", "xmip.example.", "probe.xmip.example.")
