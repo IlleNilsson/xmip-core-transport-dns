@@ -6,28 +6,24 @@
 //! the capability's (ADR-0044); a record and what it carries are
 //! [`crate::record`]'s.
 
+use crate::label::{read_name, write_name};
 use transport::error::{Result, protocol_error};
-use transport::label::{read_name, write_name};
 
 use crate::record::{
     CLASS_IN, Record, RecordData, TYPE_OPT, TYPE_SOA, TYPE_TXT, field16, rdata, read_record,
 };
 
-/// The largest message a UDP datagram carries without EDNS.
-pub const UDP_CLASSIC: usize = 512;
 /// The payload size this transport advertises in its OPT record.
 pub const UDP_EDNS: usize = 4096;
 /// The largest message at all: what a TCP length prefix can say.
 pub const MAX_MESSAGE: usize = 65_535;
 
 /// The header's QR bit: this is a response.
-pub const FLAG_RESPONSE: u16 = 0x8000;
+const FLAG_RESPONSE: u16 = 0x8000;
 /// The header's AA bit: the answer is authoritative.
-pub const FLAG_AUTHORITATIVE: u16 = 0x0400;
-pub const OPCODE_QUERY: u16 = 0;
+const FLAG_AUTHORITATIVE: u16 = 0x0400;
 pub const OPCODE_UPDATE: u16 = 5;
 pub const RCODE_NOERROR: u16 = 0;
-pub const RCODE_FORMERR: u16 = 1;
 pub const RCODE_SERVFAIL: u16 = 2;
 pub const RCODE_NOTIMP: u16 = 4;
 pub const RCODE_REFUSED: u16 = 5;

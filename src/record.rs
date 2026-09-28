@@ -5,8 +5,8 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+use crate::label::{read_name, write_name};
 use transport::error::{Result, protocol_error};
-use transport::label::{read_name, write_name};
 
 pub const TYPE_A: u16 = 1;
 pub const TYPE_SOA: u16 = 6;

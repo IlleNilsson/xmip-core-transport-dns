@@ -21,6 +21,7 @@
 //! The origin URI carries what the header knew:
 //! `dns://peer/probe.xmip.example.?zone=xmip.example.&id=4660`.
 
+pub mod label;
 pub mod loopback;
 pub mod message;
 pub mod record;
@@ -32,6 +33,7 @@ use std::time::Duration;
 
 pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
+use net::Target;
 use transport::error::{Result, classify, protocol_error};
 use transport::kept::Kept;
 use transport::sender::Sender;
@@ -197,7 +199,7 @@ impl DnsTransport {
     pub fn update(&self, target: &str, payload: &[u8]) -> Result<Message> {
         let (address, name, zone) = self.resolve(target);
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let mut update = Message::update_adding_txt(id, zone, name, payload);
+        let mut update = Message::update_adding_txt(id, &zone, name, payload);
         let response = match self.carrier {
             Carrier::Udp => {
                 update = update.with_edns();
@@ -243,18 +245,19 @@ impl DnsTransport {
         }
     }
 
-    fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str, &'a str) {
-        let Some(rest) = target.strip_prefix("dns://") else {
-            return (target, &self.name, &self.zone);
+    fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str, String) {
+        let Some(named) = Target::under(&["dns"], target) else {
+            return (target, &self.name, self.zone.clone());
         };
-        let (address, rest) = rest.split_once('/').unwrap_or((rest, ""));
-        let (name, query) = rest.split_once('?').unwrap_or((rest, ""));
-        let zone = query
-            .split('&')
-            .find_map(|pair| pair.strip_prefix("zone="))
-            .unwrap_or(&self.zone);
-        let name = if name.is_empty() { &self.name } else { name };
-        (address, name, zone)
+        let zone = named
+            .query_value("zone")
+            .unwrap_or_else(|| self.zone.clone());
+        let name = if named.path().is_empty() {
+            &self.name
+        } else {
+            named.path()
+        };
+        (named.authority(), name, zone)
     }
 }
 
