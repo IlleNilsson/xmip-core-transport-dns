@@ -12,8 +12,8 @@ use std::net::{TcpListener, UdpSocket};
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError};
 
+use net::ceiling;
 use transport::Transport;
-use transport::ceiling;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::held::Held;
 use transport::loopback::{FarEnd, LOOPBACK_TIMEOUT, Loopback, poke};
@@ -23,8 +23,8 @@ use crate::message::{self, MAX_MESSAGE, Message, UDP_EDNS};
 use crate::{Carrier, DnsTransport};
 
 /// The zone the loopback updates, and the name it adds under.
-pub const LOOPBACK_ZONE: &str = "xmip.example.";
-pub const LOOPBACK_NAME: &str = "probe.xmip.example.";
+const LOOPBACK_ZONE: &str = "xmip.example.";
+const LOOPBACK_NAME: &str = "probe.xmip.example.";
 
 /// The most one update carries as a datagram: the largest payload whose
 /// update — the zone question, one TXT record of it in strings of 255, the

@@ -1,10 +1,12 @@
 # xmip-core-transport-dns
 
-DNS transport: one dynamic update is one Stream, its TXT payload the bytes and the zone and name the address; UDP with EDNS or TCP. RFC 1035 and RFC 2136. Its message codec is the estate's one DNS codec, which the mdns technology reads and writes through. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
+DNS transport: one dynamic update is one Stream, its TXT payload the bytes and the zone and name the address; UDP with EDNS or TCP. RFC 1035 and RFC 2136. Its message codec is the estate's one DNS codec, which the mdns technology reads and writes through, with the label-and-pointer form a name takes on the wire (`label`), which the transport capability held until 2026-09-28. A technology of [xmip-core-transport](https://github.com/IlleNilsson/xmip-core-transport).
 
 A Send Location's request and its answer go through one socket per address family, bound on the first send and kept by the transport (`transport::sender::Sender`), whatever came late read off before the next request, so an IPv6 target is reached too; until 2026-09-27 every send bound a new IPv4 socket.
 
 A Receive Location keeps what it binds for its carrier on the first receive (`transport::kept::Kept`), the datagram socket or the listener: what arrives between two receives waits for the next, where until 2026-09-27 each receive bound its own and what came between was lost or refused.
+
+A send target is read by `net::Target` in [xmip-core-library-net](https://github.com/IlleNilsson/xmip-core-library-net), the one reading of a URI every technology calls, and its query is decoded there. Until 2026-09-28 this technology split the query off itself, without percent-decoding it.
 
 ## Toolchain
 
