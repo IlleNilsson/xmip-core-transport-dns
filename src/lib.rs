@@ -6,7 +6,7 @@
 //!
 //! DNS is the one protocol every network already lets through, which is why
 //! integrations end up riding it: service records that announce an endpoint,
-//! TXT records that carry a token or a small document, a zone a partner
+//! TXT records that carry a token or a small document, a zone a Party
 //! updates instead of a drop box. A Send Location sends an RFC 2136 UPDATE
 //! adding a TXT record to a zone; a Receive Location binds as the server
 //! that zone's updates reach, takes each update's TXT payload as a Stream,
