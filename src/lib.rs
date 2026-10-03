@@ -10,8 +10,12 @@
 //! updates instead of a drop box. A Send Location sends an RFC 2136 UPDATE
 //! adding a TXT record to a zone; a Receive Location binds as the server
 //! that zone's updates reach, takes each update's TXT payload as a Stream,
-//! and answers NOERROR. A QUERY that reaches a Receive Location is answered
-//! NOTIMP and skipped — serving names is a resolver's business.
+//! whole, and answers it after the whole receive cycle (`receiving.rs`):
+//! NOERROR on accepted, REFUSED on refused, SERVFAIL on failed, so the
+//! client sends it again.
+//! A QUERY that reaches a Receive Location is answered NOTIMP and skipped —
+//! serving names is a resolver's business — and an update to another zone
+//! REFUSED, both at once.
 //!
 //! Over UDP with EDNS a message is at most [`UDP_EDNS`] bytes; over TCP,
 //! RFC 1035 section 4.2.2, [`MAX_MESSAGE`]. A larger Stream is refused, and
@@ -24,10 +28,11 @@
 pub mod label;
 pub mod loopback;
 pub mod message;
+pub mod receiving;
 pub mod record;
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
@@ -127,66 +132,6 @@ impl DnsTransport {
     /// Where the address is taken, malformed, or not permitted.
     pub fn bind_tcp(&self) -> Result<(TcpListener, String)> {
         socket::bind_tcp(&self.bind)
-    }
-
-    /// Take one update from an already-bound UDP socket and answer it. A
-    /// query is answered NOTIMP and skipped.
-    ///
-    /// # Errors
-    /// Where nothing arrived in time, or what arrived is not DNS.
-    pub fn receive_datagram(&self, socket: &UdpSocket) -> Result<Arrived> {
-        let mut buffer = vec![0u8; UDP_EDNS];
-        loop {
-            let (read, peer) = socket
-                .recv_from(&mut buffer)
-                .map_err(|e| classify("receiving a datagram", &e))?;
-            let message = message::decode(&buffer[..read])?;
-            let (rcode, arrived) = self.judge(peer, &message);
-            let answer = message::encode(&message.response(rcode))?;
-            socket
-                .send_to(&answer, peer)
-                .map_err(|e| classify("answering", &e))?;
-            if let Some(arrived) = arrived {
-                return Ok(arrived);
-            }
-        }
-    }
-
-    /// Accept one TCP peer on an already-bound listener, take its update
-    /// and answer it.
-    ///
-    /// # Errors
-    /// Where the connection could not be accepted, or what came is not DNS.
-    pub fn receive_connection(&self, listener: &TcpListener) -> Result<Arrived> {
-        // The wait for the connection is bounded as well as the reads. It was
-        // bare until 2026-09-21, and a far end nobody reached waited for good.
-        let (mut stream, peer) = socket::accept_tcp(listener, self.timeout)?;
-        loop {
-            let message = read_framed(&mut stream)?;
-            let (rcode, arrived) = self.judge(peer, &message);
-            write_framed(&mut stream, &message::encode(&message.response(rcode))?)?;
-            if let Some(arrived) = arrived {
-                return Ok(arrived);
-            }
-        }
-    }
-
-    /// The rcode `message` earns, and the Stream it carries where it is an
-    /// update to this zone.
-    fn judge(&self, peer: SocketAddr, message: &Message) -> (u16, Option<Arrived>) {
-        if message.opcode() != message::OPCODE_UPDATE {
-            return (message::RCODE_NOTIMP, None);
-        }
-        let zone = message.questions.first().map_or("", |q| q.name.as_str());
-        if !self.zone.is_empty() && !zone.eq_ignore_ascii_case(&self.zone) {
-            return (message::RCODE_REFUSED, None);
-        }
-        let name = message.authority.first().map_or("", |r| r.name.as_str());
-        let origin = format!("dns://{peer}/{name}?zone={zone}&id={}", message.id);
-        (
-            message::RCODE_NOERROR,
-            Some(Arrived::new(origin, message.txt_payload())),
-        )
     }
 
     /// Send an update adding a TXT record carrying `payload` to the server at
@@ -296,8 +241,14 @@ impl Transport for DnsTransport {
         Directions::BOTH
     }
 
+    fn arrivals(&self) -> transport::Arrivals {
+        transport::Arrivals::Unordered("each update is its own, answered by its own id")
+    }
+
     /// One update, from the socket or listener the first receive bound and
-    /// kept: what arrived between two receives waits there.
+    /// kept: what arrived between two receives waits there. Its client waits
+    /// for the answer until the cycle has ended: NOERROR on accepted,
+    /// REFUSED on refused, SERVFAIL on failed.
     fn receive(&self) -> Result<Vec<Arrived>> {
         match self.carrier {
             Carrier::Udp => {
@@ -449,6 +400,8 @@ mod tests {
             near.send(&address, b"")
         });
         let arrived = far_end.receive_datagram(&socket).expect("receiving");
+        assert!(arrived.defers(), "the client waits for the answer");
+        let arrived = arrived.taken().expect("answered NOERROR");
         assert_eq!(arrived.bytes, payload);
         assert!(
             arrived
@@ -456,6 +409,7 @@ mod tests {
                 .contains("/order.xmip.example.?zone=xmip.example.&id=")
         );
         let empty = far_end.receive_datagram(&socket).expect("receiving");
+        let empty = empty.taken().expect("answered");
         assert!(empty.bytes.is_empty());
         assert!(empty.origin_uri.contains("/probe.xmip.example.?"));
         sender.join().expect("thread").expect("sending");
@@ -493,10 +447,60 @@ mod tests {
             near.send(&address, &vec![0; UDP_EDNS])
         });
         let arrived = far_end.receive_connection(&listener).expect("receiving");
-        assert_eq!(arrived.bytes, payload);
+        assert_eq!(arrived.taken().expect("answered").bytes, payload);
         let second = far_end.receive_connection(&listener).expect("second");
-        assert_eq!(second.bytes.len(), UDP_EDNS);
+        assert_eq!(second.taken().expect("answered").bytes.len(), UDP_EDNS);
         sender.join().expect("thread").expect("sending");
+    }
+
+    #[test]
+    fn an_update_is_answered_refused_servfail_or_noerror_by_its_verdict() {
+        for carrier in [Carrier::Udp, Carrier::Tcp] {
+            let receiver = DnsTransport::loopback().over(carrier);
+            let address = match carrier {
+                Carrier::Udp => {
+                    receiver
+                        .datagrams
+                        .bound(|| receiver.bind_udp())
+                        .expect("udp");
+                    receiver.datagrams.address()
+                }
+                Carrier::Tcp => {
+                    receiver
+                        .connections
+                        .bound(|| receiver.bind_tcp())
+                        .expect("tcp");
+                    receiver.connections.address()
+                }
+            }
+            .expect("address")
+            .to_string();
+            let sender = std::thread::spawn(move || {
+                let near = DnsTransport::loopback().over(carrier);
+                [b"R1", b"C1", b"C1"].map(|body| near.send(&address, body))
+            });
+            let mut refused = receiver.receive().expect("the first");
+            refused
+                .remove(0)
+                .refused(transport::Refusal::Forbidden)
+                .expect("answered REFUSED");
+            let mut failed = receiver.receive().expect("the second");
+            failed.remove(0).failed().expect("answered SERVFAIL");
+            let mut accepted = receiver.receive().expect("sent again");
+            assert_eq!(accepted.remove(0).taken().expect("NOERROR").bytes, b"C1");
+            let [refused, failed, accepted] = sender.join().expect("thread");
+            let error = refused.expect_err("REFUSED");
+            assert!(
+                !error.retryable && error.message.contains("rcode 5"),
+                "{error}"
+            );
+            let error = failed.expect_err("SERVFAIL");
+            assert!(
+                error.retryable && error.message.contains("SERVFAIL"),
+                "{error}"
+            );
+            accepted.expect("NOERROR");
+        }
     }
 
     #[test]

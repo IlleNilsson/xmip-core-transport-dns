@@ -132,7 +132,7 @@ impl Loopback for DnsTransport {
             wake(&woken);
             drop(over_udp.join());
             drop(over_tcp.join());
-            first?
+            first??.taken()
         })))
     }
 
