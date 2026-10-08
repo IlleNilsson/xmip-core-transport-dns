@@ -13,6 +13,7 @@ use std::sync::OnceLock;
 use std::sync::mpsc::{self, RecvTimeoutError};
 
 use net::ceiling;
+use transport::ArrivalIdentity;
 use transport::Transport;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::held::Held;
@@ -93,6 +94,10 @@ fn wake(address: &str) {
 }
 
 impl Loopback for DnsTransport {
+    fn arrival_identity(&self) -> ArrivalIdentity {
+        ArrivalIdentity::PEER
+    }
+
     fn ceiling(&self) -> Option<usize> {
         Some(message_ceiling())
     }
