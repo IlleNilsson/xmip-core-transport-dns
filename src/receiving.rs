@@ -42,7 +42,7 @@ impl DnsTransport {
                     let acknowledgement = Acknowledgement::deferred(move |verdict| {
                         answering.send(&message::encode(&message.response(rcode_of(verdict)))?)
                     });
-                    return Ok(Arrived::whole(origin, payload, acknowledgement));
+                    return Ok(Arrived::whole(origin, payload, acknowledgement).from_peer(peer));
                 }
                 Err(rcode) => {
                     let answer = message::encode(&message.response(rcode))?;
@@ -72,7 +72,7 @@ impl DnsTransport {
                         let answer = message::encode(&message.response(rcode_of(verdict)))?;
                         write_framed(&mut stream, &answer)
                     });
-                    return Ok(Arrived::whole(origin, payload, acknowledgement));
+                    return Ok(Arrived::whole(origin, payload, acknowledgement).from_peer(peer));
                 }
                 Err(rcode) => {
                     write_framed(&mut stream, &message::encode(&message.response(rcode))?)?;
