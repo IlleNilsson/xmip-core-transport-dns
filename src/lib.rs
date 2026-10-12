@@ -245,6 +245,10 @@ impl Transport for DnsTransport {
         transport::Arrivals::Unordered("each update is its own, answered by its own id")
     }
 
+    fn waiting(&self) -> transport::Waiting {
+        transport::Waiting::Waits("the socket or listener waits for an update")
+    }
+
     /// One update, from the socket or listener the first receive bound and
     /// kept: what arrived between two receives waits there. Its client waits
     /// for the answer until the cycle has ended: NOERROR on accepted,
