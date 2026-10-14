@@ -414,7 +414,7 @@ mod tests {
         );
         let empty = far_end.receive_datagram(&socket).expect("receiving");
         let empty = empty.taken().expect("answered");
-        assert!(empty.bytes.is_empty());
+        assert_eq!(empty.bytes, [] as [u8; 0]);
         assert!(empty.origin_uri.contains("/probe.xmip.example.?"));
         sender.join().expect("thread").expect("sending");
     }

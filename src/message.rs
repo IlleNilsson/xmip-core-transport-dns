@@ -302,7 +302,7 @@ mod tests {
         let empty = Message::update_adding_txt(1, "z.", "n.", &[]);
         let back = decode(&encode(&empty).expect("encode")).expect("decode");
         assert_eq!(back, empty, "one empty string, as RFC 6763 6.1 writes it");
-        assert!(back.txt_payload().is_empty());
+        assert_eq!(back.txt_payload(), [] as [u8; 0]);
         let response = update.response(RCODE_REFUSED);
         assert!(response.is_response());
         assert_eq!(response.rcode(), RCODE_REFUSED);
