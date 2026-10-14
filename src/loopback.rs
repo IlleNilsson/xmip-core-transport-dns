@@ -66,14 +66,23 @@ impl DnsTransport {
     }
 
     /// The datagram socket and the listener on one port, as a name server
-    /// has them. The port is the kernel's choice for the listener, and the
-    /// socket follows it: a busy machine holds its TCP ports in `TIME_WAIT` by
-    /// the thousand, so a free TCP port is the scarce one, and a UDP port
-    /// beside it is almost always free.
+    /// has them. The port is the kernel's choice for the listener first, and
+    /// the socket follows it: a busy machine holds its TCP ports in
+    /// `TIME_WAIT` by the thousand, so a free TCP port is the scarce one.
+    /// Where the socket cannot follow, the socket chooses and the listener
+    /// follows: Windows excludes blocks of a hundred UDP ports that are not
+    /// excluded for TCP, and hands out TCP ports nearly in sequence, so a
+    /// listener that lands in such a block lands there for every retry
+    /// (2026-10-14, error 10013 on all sixteen).
     fn bind_both(&self) -> Result<(UdpSocket, TcpListener, String)> {
         for _ in 0..16 {
             let (listener, address) = self.bind_tcp()?;
             if let Ok((socket, _)) = socket::bind_udp(&address, self.timeout) {
+                return Ok((socket, listener, address));
+            }
+            drop(listener);
+            let (socket, address) = self.bind_udp()?;
+            if let Ok((listener, _)) = socket::bind_tcp(&address) {
                 return Ok((socket, listener, address));
             }
         }
