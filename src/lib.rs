@@ -458,6 +458,29 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_update_is_answered_over_what_the_client_pipelined_after() {
+        // A client may pipeline (RFC 7766). The REFUSED is written with
+        // megabytes it sent after the update unread, which a bare drop
+        // resets away on Windows.
+        let far_end = node().over(Carrier::Tcp);
+        let (listener, address) = far_end.bind_tcp().expect("binding");
+        let serving = std::thread::spawn(move || {
+            let arrived = far_end.receive_connection(&listener).expect("receiving");
+            arrived.refused(transport::Refusal::Forbidden)
+        });
+        let update = Message::update_adding_txt(11, "xmip.example.", "n.", b"refused");
+        let update = message::encode(&update).expect("encode");
+        let mut head = u16::try_from(update.len())
+            .expect("short")
+            .to_be_bytes()
+            .to_vec();
+        head.extend(update);
+        let answer = transport::unread::answered_over_unread(&address, &head, 0, read_framed);
+        assert_eq!(answer.expect("the answer").rcode(), message::RCODE_REFUSED);
+        serving.join().expect("the far end").expect("answered");
+    }
+
+    #[test]
     fn an_update_is_answered_refused_servfail_or_noerror_by_its_verdict() {
         for carrier in [Carrier::Udp, Carrier::Tcp] {
             let receiver = DnsTransport::loopback().over(carrier);
