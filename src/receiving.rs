@@ -70,7 +70,11 @@ impl DnsTransport {
                     let payload = message.txt_payload();
                     let acknowledgement = Acknowledgement::deferred(move |verdict| {
                         let answer = message::encode(&message.response(rcode_of(verdict)))?;
-                        write_framed(&mut stream, &answer)
+                        write_framed(&mut stream, &answer)?;
+                        // A client may pipeline its next message (RFC 7766
+                        // section 6.2.1.1); unread, a bare drop would reset
+                        // this answer away.
+                        socket::finish(&stream)
                     });
                     return Ok(Arrived::whole(origin, payload, acknowledgement).from_peer(peer));
                 }
