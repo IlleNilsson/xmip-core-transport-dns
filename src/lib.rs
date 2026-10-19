@@ -253,7 +253,7 @@ impl Transport for DnsTransport {
     /// kept: what arrived between two receives waits there. Its client waits
     /// for the answer until the cycle has ended: NOERROR on accepted,
     /// REFUSED on refused, SERVFAIL on failed.
-    fn receive(&self) -> Result<Vec<Arrived>> {
+    fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         match self.carrier {
             Carrier::Udp => {
                 let socket = self.datagrams.bound(|| self.bind_udp())?;
@@ -266,7 +266,12 @@ impl Transport for DnsTransport {
         }
     }
 
-    fn send(&self, target: &str, bytes: &[u8]) -> Result<()> {
+    fn sending(&self) -> transport::Sending {
+        transport::Sending::Gathered("one DNS UPDATE message carries the whole body")
+    }
+
+    fn send_from(&self, target: &str, outgoing: transport::Outgoing<'_>) -> Result<()> {
+        let bytes: &[u8] = &outgoing.gather()?;
         self.update(target, bytes).map(|_| ())
     }
 }
