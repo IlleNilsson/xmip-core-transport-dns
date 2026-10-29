@@ -191,7 +191,7 @@ impl DnsTransport {
     }
 
     fn resolve<'a>(&'a self, target: &'a str) -> (&'a str, &'a str, String) {
-        let Some(named) = Target::under(&["dns"], target) else {
+        let Some(named) = Target::under(Self::SCHEMES, target) else {
             return (target, &self.name, self.zone.clone());
         };
         let zone = named
@@ -319,6 +319,9 @@ impl Configured for DnsTransport {
             },
         ],
     };
+
+    /// The schemes a Location's address is entered with to choose this technology.
+    const SCHEMES: &'static [&'static str] = &["dns"];
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let zone = settings.optional_text("zone").unwrap_or_default();
