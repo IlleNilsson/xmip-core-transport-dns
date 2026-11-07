@@ -9,7 +9,7 @@
 //! zone question, the record's name and the TXT string lengths.
 
 use std::net::{TcpListener, UdpSocket};
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 use std::sync::mpsc::{self, RecvTimeoutError};
 
 use net::ceiling;
@@ -33,16 +33,16 @@ const LOOPBACK_NAME: &str = "probe.xmip.example.";
 /// through the transport's own encoder once and remembered.
 #[must_use]
 pub fn datagram_ceiling() -> usize {
-    static CEILING: OnceLock<usize> = OnceLock::new();
-    *CEILING.get_or_init(|| largest_fitting(UDP_EDNS, true))
+    static CEILING: LazyLock<usize> = LazyLock::new(|| largest_fitting(UDP_EDNS, true));
+    *CEILING
 }
 
 /// The most one update carries at all: the largest payload whose update
 /// still fits the sixteen-bit length a TCP message is prefixed with.
 #[must_use]
 pub fn message_ceiling() -> usize {
-    static CEILING: OnceLock<usize> = OnceLock::new();
-    *CEILING.get_or_init(|| largest_fitting(MAX_MESSAGE, false))
+    static CEILING: LazyLock<usize> = LazyLock::new(|| largest_fitting(MAX_MESSAGE, false));
+    *CEILING
 }
 
 fn largest_fitting(limit: usize, edns: bool) -> usize {
