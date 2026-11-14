@@ -32,16 +32,18 @@ pub mod receiving;
 pub mod record;
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{TcpListener, UdpSocket};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 pub use loopback::{datagram_ceiling, message_ceiling};
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
 use net::Target;
+pub use receiving::Client;
 use transport::error::{Result, classify, protocol_error};
 use transport::kept::Kept;
 use transport::sender::Sender;
+use transport::serving::Serving;
 use transport::socket;
 use transport::{Arrived, Configured, Directions, Transport};
 use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
@@ -63,9 +65,10 @@ pub struct DnsTransport {
     /// The socket every update over UDP leaves from, bound once.
     sender: Sender,
     /// What the first receive binds for the carrier, and every receive
-    /// takes from: the datagram socket, or the listener.
+    /// takes from: the datagram socket, or the listener and the clients'
+    /// connections kept open on it between their updates.
     datagrams: Kept<UdpSocket>,
-    connections: Kept<TcpListener>,
+    connections: Serving<Client>,
 }
 
 impl Clone for DnsTransport {
@@ -100,7 +103,7 @@ impl DnsTransport {
             next_id: AtomicU16::new(1),
             sender: Sender::new(),
             datagrams: Kept::new(),
-            connections: Kept::new(),
+            connections: Serving::new(),
         }
     }
 
@@ -207,7 +210,7 @@ impl DnsTransport {
 }
 
 /// One message with its two-byte length before it, RFC 1035 section 4.2.2.
-fn read_framed(stream: &mut TcpStream) -> Result<Message> {
+fn read_framed(stream: &mut impl Read) -> Result<Message> {
     let mut length = [0u8; 2];
     stream
         .read_exact(&mut length)
@@ -219,7 +222,7 @@ fn read_framed(stream: &mut TcpStream) -> Result<Message> {
     message::decode(&bytes)
 }
 
-fn write_framed(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
+fn write_framed(stream: &mut impl Write, bytes: &[u8]) -> Result<()> {
     let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
     stream
         .write_all(&length.to_be_bytes())
@@ -249,20 +252,29 @@ impl Transport for DnsTransport {
         transport::Waiting::Waits("the socket or listener waits for an update")
     }
 
+    /// The TCP clients turned away at their own connection
+    /// (`transport::serving`); a datagram turns nobody away.
+    fn turned_away(&self) -> transport::Turned {
+        self.connections.turned_away()
+    }
+
     /// One update, from the socket or listener the first receive bound and
-    /// kept: what arrived between two receives waits there. Its client waits
-    /// for the answer until the cycle has ended: NOERROR on accepted,
-    /// REFUSED on refused, SERVFAIL on failed.
+    /// kept: what arrived between two receives waits there; over TCP from
+    /// whichever client sends first, its connection kept for its next. Its
+    /// client waits for the answer until the cycle has ended: NOERROR on
+    /// accepted, REFUSED on refused, SERVFAIL on failed.
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         match self.carrier {
             Carrier::Udp => {
                 let socket = self.datagrams.bound(|| self.bind_udp())?;
                 Ok(vec![self.receive_datagram(socket)?])
             }
-            Carrier::Tcp => {
-                let listener = self.connections.bound(|| self.bind_tcp())?;
-                Ok(vec![self.receive_connection(listener)?])
-            }
+            Carrier::Tcp => Ok(vec![self.connections.next(
+                || self.bind_tcp(),
+                self.timeout,
+                Client::kept,
+                |client| self.turn(client),
+            )?]),
         }
     }
 
@@ -335,11 +347,18 @@ impl Configured for DnsTransport {
         }
         Ok(transport)
     }
+
+    /// Each TCP client's turn on a Receive Location taking at most `turn`.
+    fn turning_within(mut self, turn: Duration) -> Self {
+        self.connections = self.connections.turning_within(turn);
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpStream;
     use xcore::settings::Given;
 
     #[test]
@@ -369,6 +388,43 @@ mod tests {
     fn node() -> DnsTransport {
         DnsTransport::new("127.0.0.1:0", "xmip.example.", "probe.xmip.example.")
             .timing_out_after(Duration::from_secs(2))
+    }
+
+    #[test]
+    fn a_client_that_stops_partway_is_cut_at_its_turn_and_the_next_is_served() {
+        // Until 2026-11-14 it held the Location for as long as a read
+        // waits, two seconds here, and for good where none is set.
+        let turn = Duration::from_millis(200);
+        let receiver = node().over(Carrier::Tcp).turning_within(turn);
+        let address = receiver
+            .connections
+            .bound(|| receiver.bind_tcp())
+            .expect("bound")
+            .to_string();
+        let mut stopped = TcpStream::connect(&address).expect("connect");
+        let from = stopped.local_addr().expect("its address");
+        // A length promising forty octets, and three of them.
+        stopped
+            .write_all(&[0, 40, 0, 1, 0x28])
+            .expect("half an update");
+        let at = address.clone();
+        let sender = std::thread::spawn(move || node().over(Carrier::Tcp).send(&at, b"after"));
+        let began = std::time::Instant::now();
+        let mut arrived = receiver.receive().expect("the next client");
+        let took = began.elapsed();
+        assert!(
+            took >= turn,
+            "served after {took:?}, inside the other's turn"
+        );
+        assert!(took < Duration::from_millis(1500), "served after {took:?}");
+        let taken = arrived.remove(0).taken().expect("answered NOERROR");
+        assert_eq!(taken.bytes, b"after");
+        sender.join().expect("thread").expect("sent");
+        let turned = receiver.turned_away();
+        assert_eq!(turned.callers.len(), 1, "{turned:?}");
+        assert_eq!(turned.callers[0].peer, from);
+        assert!(turned.callers[0].why.message.contains("turn"), "{turned:?}");
+        drop(stopped);
     }
 
     #[test]
