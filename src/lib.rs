@@ -114,13 +114,6 @@ impl DnsTransport {
         self
     }
 
-    /// Give up waiting for an update or an answer after `timeout`.
-    #[must_use]
-    pub const fn timing_out_after(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
-        self
-    }
-
     /// Bind the UDP socket and report the address actually assigned.
     ///
     /// # Errors
@@ -321,19 +314,21 @@ impl Configured for DnsTransport {
                           length prefix; udp when left out.",
                 applies: Applies::Both,
             },
-            Setting {
-                name: "timeout",
-                kind: Kind::Duration,
-                presence: Presence::Optional,
-                meaning: "How long an update or an answer is waited for; unbounded when left \
-                          out.",
-                applies: Applies::Both,
-            },
+            transport::configured::timeout(
+                Applies::Both,
+                None,
+                "How long an update or an answer is waited for; unbounded when left \
+                 out.",
+            ),
         ],
     };
 
     /// The schemes a Location's address is entered with to choose this technology.
     const SCHEMES: &'static [&'static str] = &["dns"];
+
+    fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
+        Some(&mut self.timeout)
+    }
 
     fn configured(address: &str, settings: &xcore::settings::Read) -> Result<Self> {
         let zone = settings.optional_text("zone").unwrap_or_default();
@@ -341,9 +336,6 @@ impl Configured for DnsTransport {
         let mut transport = Self::new(address, zone, name);
         if settings.optional_text("carrier") == Some("tcp") {
             transport = transport.over(Carrier::Tcp);
-        }
-        if let Some(timeout) = settings.optional_duration("timeout") {
-            transport = transport.timing_out_after(timeout);
         }
         Ok(transport)
     }

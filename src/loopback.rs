@@ -14,6 +14,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 
 use net::ceiling;
 use transport::ArrivalIdentity;
+use transport::Configured;
 use transport::Transport;
 use transport::error::{Result, TransportError, protocol_error};
 use transport::held::Held;
