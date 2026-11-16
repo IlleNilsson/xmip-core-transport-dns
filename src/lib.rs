@@ -345,6 +345,12 @@ impl Configured for DnsTransport {
         self.connections = self.connections.turning_within(turn);
         self
     }
+
+    /// Each callers turn on a Receive Location counted on clock.
+    fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
+        self.connections = self.connections.timed_by(clock);
+        self
+    }
 }
 
 #[cfg(test)]
