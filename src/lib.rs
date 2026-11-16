@@ -64,7 +64,7 @@ pub struct DnsTransport {
     next_id: AtomicU16,
     /// The socket every update over UDP leaves from, bound once.
     sender: Sender,
-    /// What the first receive binds for the carrier, and every receive
+    /// What its open binds for the carrier, and every receive
     /// takes from: the datagram socket, or the listener and the clients'
     /// connections kept open on it between their updates.
     datagrams: Kept<UdpSocket>,
@@ -251,7 +251,7 @@ impl Transport for DnsTransport {
         self.connections.turned_away()
     }
 
-    /// One update, from the socket or listener the first receive bound and
+    /// One update, from the socket or listener its open bound and
     /// kept: what arrived between two receives waits there; over TCP from
     /// whichever client sends first, its connection kept for its next. Its
     /// client waits for the answer until the cycle has ended: NOERROR on
@@ -259,11 +259,10 @@ impl Transport for DnsTransport {
     fn receive_up_to(&self, _most: usize) -> Result<Vec<Arrived>> {
         match self.carrier {
             Carrier::Udp => {
-                let socket = self.datagrams.bound(|| self.bind_udp())?;
+                let socket = self.datagrams.listener()?;
                 Ok(vec![self.receive_datagram(socket)?])
             }
             Carrier::Tcp => Ok(vec![self.connections.next(
-                || self.bind_tcp(),
                 self.timeout,
                 Client::kept,
                 |client| self.turn(client),
@@ -350,6 +349,15 @@ impl Configured for DnsTransport {
     fn timed_by(mut self, clock: &std::sync::Arc<dyn xcore::Clock>) -> Self {
         self.connections = self.connections.timed_by(clock);
         self
+    }
+
+    /// What every receive takes from, bound where a Receive Location
+    /// listens: a datagram socket, or a listener over TCP.
+    fn listening(&self) -> Result<Option<&str>> {
+        match self.carrier {
+            Carrier::Udp => self.datagrams.listening(|| self.bind_udp()),
+            Carrier::Tcp => self.connections.bound(|| self.bind_tcp()).map(Some),
+        }
     }
 }
 
