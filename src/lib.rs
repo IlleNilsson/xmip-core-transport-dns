@@ -24,37 +24,60 @@
 //!
 //! The origin URI carries what the header knew:
 //! `dns://peer/probe.xmip.example.?zone=xmip.example.&id=4660`.
+//!
+//! **Built with its `declaration` feature alone** the crate is
+//! [`declaration`], what a Location of it is configured with, and none of
+//! the code above, which is behind the default feature: what the surfaces'
+//! library carries (ADR-0064, amendment 2026-11-26).
 
+#[cfg(feature = "declaration")]
+pub mod declaration;
+#[cfg(feature = "default")]
 pub mod label;
+#[cfg(feature = "default")]
 pub mod loopback;
+#[cfg(feature = "default")]
 pub mod message;
+#[cfg(feature = "default")]
 pub mod receiving;
+#[cfg(feature = "default")]
 pub mod record;
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, UdpSocket};
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+#[cfg(feature = "default")]
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, UdpSocket},
+    sync::atomic::{AtomicU16, Ordering},
+    time::Duration,
+};
 
+#[cfg(feature = "default")]
 pub use loopback::{datagram_ceiling, message_ceiling};
+#[cfg(feature = "default")]
 pub use message::{MAX_MESSAGE, Message, UDP_EDNS};
+#[cfg(feature = "default")]
 use net::Target;
+#[cfg(feature = "default")]
 pub use receiving::Client;
+#[cfg(feature = "default")]
 use transport::error::{Result, classify, protocol_error};
-use transport::kept::Kept;
-use transport::sender::Sender;
-use transport::serving::Serving;
-use transport::socket;
-use transport::{Arrived, Configured, Directions, Transport};
-use xcore::settings::{Applies, Kind, Presence, Setting, Settings};
+#[cfg(feature = "default")]
+use transport::{
+    Arrived, Configured, Directions, Transport, kept::Kept, sender::Sender, serving::Serving,
+    socket,
+};
+#[cfg(feature = "default")]
+use xcore::settings::Settings;
 
 /// UDP datagrams with EDNS, or TCP with a length prefix.
+#[cfg(feature = "default")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Carrier {
     Udp,
     Tcp,
 }
 
+#[cfg(feature = "default")]
 pub struct DnsTransport {
     bind: String,
     zone: String,
@@ -71,6 +94,7 @@ pub struct DnsTransport {
     connections: Serving<Client>,
 }
 
+#[cfg(feature = "default")]
 impl Clone for DnsTransport {
     /// The same ends and the id count as it stands, so a copy's updates go
     /// on from where this one's have got to.
@@ -89,6 +113,7 @@ impl Clone for DnsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl DnsTransport {
     /// Listen at `bind`, `0.0.0.0:53` being the standard port, for updates
     /// to `zone`; send updates adding `name` in it.
@@ -203,6 +228,7 @@ impl DnsTransport {
 }
 
 /// One message with its two-byte length before it, RFC 1035 section 4.2.2.
+#[cfg(feature = "default")]
 fn read_framed(stream: &mut impl Read) -> Result<Message> {
     let mut length = [0u8; 2];
     stream
@@ -215,6 +241,7 @@ fn read_framed(stream: &mut impl Read) -> Result<Message> {
     message::decode(&bytes)
 }
 
+#[cfg(feature = "default")]
 fn write_framed(stream: &mut impl Write, bytes: &[u8]) -> Result<()> {
     let length = u16::try_from(bytes.len()).unwrap_or(u16::MAX);
     stream
@@ -228,6 +255,7 @@ fn write_framed(stream: &mut impl Write, bytes: &[u8]) -> Result<()> {
         .map_err(|e| classify("flushing the message", &e))
 }
 
+#[cfg(feature = "default")]
 impl Transport for DnsTransport {
     fn name(&self) -> &'static str {
         "dns"
@@ -280,50 +308,10 @@ impl Transport for DnsTransport {
     }
 }
 
+#[cfg(feature = "default")]
 impl Configured for DnsTransport {
-    /// The address is where a Receive Location listens for updates —
-    /// `0.0.0.0:53` the standard port; a Send Location updates the server its
-    /// target gives.
-    const SETTINGS: &'static Settings = &Settings {
-        technology: env!("CARGO_PKG_NAME"),
-        settings: &[
-            Setting {
-                name: "zone",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The zone updates are taken for or sent to where the target names \
-                          none; a Receive Location without one takes every zone.",
-                applies: Applies::Both,
-            },
-            Setting {
-                name: "name",
-                kind: Kind::Text,
-                presence: Presence::Optional,
-                meaning: "The owner name an update adds its TXT record under where the target \
-                          names none.",
-                applies: Applies::Send,
-            },
-            Setting {
-                name: "carrier",
-                kind: Kind::Choice {
-                    choices: &["udp", "tcp"],
-                },
-                presence: Presence::Optional,
-                meaning: "Whether messages travel as UDP datagrams with EDNS or over TCP with a \
-                          length prefix; udp when left out.",
-                applies: Applies::Both,
-            },
-            transport::configured::timeout(
-                Applies::Both,
-                None,
-                "How long an update or an answer is waited for; unbounded when left \
-                 out.",
-            ),
-        ],
-    };
-
-    /// The schemes a Location's address is entered with to choose this technology.
-    const SCHEMES: &'static [&'static str] = &["dns"];
+    const SETTINGS: &'static Settings = declaration::SETTINGS;
+    const SCHEMES: &'static [&'static str] = declaration::SCHEMES;
 
     fn timeout_kept(&mut self) -> Option<&mut dyn transport::configured::TimeoutKept> {
         Some(&mut self.timeout)
@@ -365,7 +353,7 @@ impl Configured for DnsTransport {
 mod tests {
     use super::*;
     use std::net::TcpStream;
-    use xcore::settings::Given;
+    use xcore::settings::{Applies, Given};
 
     #[test]
     fn dns_declares_its_settings_and_reads_through_them() {

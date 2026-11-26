@@ -19,6 +19,22 @@ which RFC 2136 section 4.5 has the client send again (and a send of this
 transport answered SERVFAIL fails as retryable, any other rcode as permanent). A query is answered NOTIMP and an update to another zone REFUSED at
 once; neither is a Stream. Each update's TXT payload arrives whole.
 
+## The declaration
+
+What a Location of this technology is configured with is two `const`s in its
+`declaration` module, `src/declaration.rs`, beside the code, which
+`Configured` reads (ADR-0064, amendment 2026-11-26):
+`declaration::SETTINGS`, `zone`, `name`, `carrier` and `timeout`, and
+`SCHEMES`, `dns`. Built with its `declaration` feature alone
+(`--no-default-features --features declaration`), the crate is those and
+nothing more: its code and every crate the code is built on are behind the
+default feature. So the library the surfaces load can carry it without the
+code, for the language server and the desktop to suggest and check a DNS
+Location's settings though no node in their process loaded the technology,
+once the gathering crate of open problem 48 links it.
+`test/Declaration.Test.ps1` in the estate holds that the declaration builds
+nothing the transport capability does not.
+
 ## Toolchain
 
 `rust-toolchain.toml` pins the toolchain for the whole estate. Do not change it
